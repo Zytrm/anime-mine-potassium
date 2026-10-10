@@ -3,7 +3,7 @@
 
 repeat task.wait() until game:IsLoaded()
 
-local BUILD = "r7"
+local BUILD = "r8"
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -507,7 +507,7 @@ local function ownHolderPrompt(slot)
         return nil
     end
     for _, plot in ipairs(plots:GetChildren()) do
-        if plot:GetAttribute("OwnerUserId") == player.UserId then
+        if tostring(plot:GetAttribute("OwnerUserId")) == tostring(player.UserId) then
             local holders = plot:FindFirstChild("Holders")
             local holder = holders and holders:FindFirstChild(slot)
             local pad = holder and holder:FindFirstChild("Pad")
@@ -541,29 +541,65 @@ local function triggerNativeHolderPrompt(prompt)
 end
 
 local function triggerHolderPrompt(job, preferNative)
+    local prompt = ownHolderPrompt(job.slot)
+    if not prompt or not prompt.Enabled then
+        job.promptError = job.slot .. " prompt unavailable"
+        return false
+    end
+    job.prompt = prompt
+    job.promptAction = prompt.ActionText
     job.promptSentAt = os.clock()
     job.nativeAttempted = false
     job.nativeSent = false
+    job.replicatedSent = false
+    -- The public Triggered signal is local-only in Potassium. The live
+    -- replication whitelist exposes this separate signal with one Player arg.
+    if type(replicatesignal) == "function" and type(cansignalreplicate) == "function" then
+        local available, signal = pcall(function()
+            return prompt.TriggeredActionReplicated
+        end)
+        local checked, canReplicate = false, false
+        if available then
+            checked, canReplicate = pcall(cansignalreplicate, signal)
+        end
+        if checked and canReplicate then
+            local ok, err = pcall(replicatesignal, signal, player)
+            job.replicatedSent = ok
+            job.triggerMethod = "replicated"
+            job.promptError = not ok and tostring(err) or nil
+            -- Never send a second pickup after submitting a server signal:
+            -- a delayed acknowledgement could make it place the old miner back.
+            return ok
+        end
+    end
     if preferNative then
         job.nativeAttempted = true
         job.nativeSent = triggerNativeHolderPrompt(job.prompt)
         if job.nativeSent then
+            job.triggerMethod = "native"
             return true
         end
     end
     if type(fireproximityprompt) == "function" then
         local ok = pcall(fireproximityprompt, job.prompt)
         if ok then
+            job.triggerMethod = "executor"
             return true
         end
     end
     job.nativeAttempted = true
     job.nativeSent = triggerNativeHolderPrompt(job.prompt)
+    job.triggerMethod = "native"
     return job.nativeSent
 end
 
 local function retryHolderPrompt(job)
-    if not job.nativeAttempted and os.clock() - (job.promptSentAt or 0) >= 1.5 then
+    if not job.replicatedSent and not job.nativeAttempted
+        and os.clock() - (job.promptSentAt or 0) >= 1.5 then
+        job.prompt = ownHolderPrompt(job.slot)
+        if not job.prompt or not job.prompt.Enabled then
+            return
+        end
         job.nativeAttempted = true
         job.nativeSent = triggerNativeHolderPrompt(job.prompt)
     end
@@ -586,7 +622,7 @@ local function processPromotion(mine)
             return
         end
         local prompt = ownHolderPrompt(candidate.slot)
-        if not prompt or not prompt.Enabled or prompt.ActionText ~= "Pick up" then
+        if not prompt then
             state.failedPromotionSlots[candidate.slot] = os.clock() + 300
             state.lastFailedPromotionSlot = candidate.slot
             state.nextPromotionAt = os.clock() + 1
@@ -607,10 +643,10 @@ local function processPromotion(mine)
             state.suppressDropsUntil = os.clock() + 3
             if not triggerHolderPrompt(job) then
                 state.promotion = nil
-                state.promotionStatus = "Prompt trigger unavailable"
+                state.promotionStatus = job.promptError or "Prompt trigger unavailable"
                 return
             end
-            state.promotionStatus = "Picking up " .. candidate.slot
+            state.promotionStatus = "Picking up " .. candidate.slot .. " via " .. job.triggerMethod
             state.lastAction = "Mythic: picking up weakest miner"
         end
         return
@@ -627,8 +663,8 @@ local function processPromotion(mine)
         send("MineEquipBest")
         state.lastAction = "Mythic swap timed out"
         state.promotionStatus = job.phase == "awaitEmpty"
-            and (job.slot .. " " .. job.promptAction .. " failed; trying next")
-            or job.phase == "awaitPlace" and "Remote placement not accepted"
+            and (job.slot .. " " .. (job.triggerMethod or "prompt") .. " pickup unchanged; next")
+            or job.phase == "awaitPlace" and (job.slot .. " placement unchanged")
             or "Timed out at " .. job.phase
         return
     end
@@ -638,15 +674,15 @@ local function processPromotion(mine)
             state.suppressDropsUntil = os.clock() + 3
             if not triggerHolderPrompt(job) then
                 state.promotion = nil
-                state.promotionStatus = "Prompt trigger unavailable"
+                state.promotionStatus = job.promptError or "Prompt trigger unavailable"
                 return
             end
             job.phase = "awaitEmpty"
             job.deadline = os.clock() + 10
-            state.promotionStatus = "Picking up " .. job.slot
+            state.promotionStatus = "Picking up " .. job.slot .. " via " .. job.triggerMethod
         end
     elseif job.phase == "awaitEmpty" then
-        if not (holder and holder.CharName) then
+        if not (holder and type(holder.CharName) == "string" and holder.CharName ~= "") then
             state.failedPromotionSlots[job.slot] = nil
             job.hotbar = MineInventory.TargetSlot(mine, job.key)
             send("MineAssignHotbar", job.hotbar, job.key)
@@ -671,15 +707,20 @@ local function processPromotion(mine)
         end
     elseif job.phase == "awaitEquip" then
         if MineInventory.EquippedSlot(mine) == job.hotbar then
+            local prompt = ownHolderPrompt(job.slot)
+            if not prompt or not prompt.Enabled then
+                state.promotionStatus = "Waiting for " .. job.slot .. " placement prompt"
+                return
+            end
             if not triggerHolderPrompt(job, job.nativeSent) then
                 state.promotion = nil
-                state.promotionStatus = "Prompt trigger unavailable"
+                state.promotionStatus = job.promptError or "Prompt trigger unavailable"
                 return
             end
             job.phase = "awaitPlace"
             job.deadline = os.clock() + 10
             state.lastAction = "Mythic: placing " .. job.name
-            state.promotionStatus = "Placing " .. job.name
+            state.promotionStatus = "Placing at " .. job.slot .. " via " .. job.triggerMethod
         end
     elseif job.phase == "awaitPlace" then
         if holder and holder.CharName == job.name then
