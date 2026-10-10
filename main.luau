@@ -3,6 +3,8 @@
 
 repeat task.wait() until game:IsLoaded()
 
+local BUILD = "r4"
+
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
@@ -823,7 +825,7 @@ track(player.Idled:Connect(function()
     state.lastAction = ok and "Idle activity sent" or "Anti-AFK unavailable"
 end))
 
-local reloadCode = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/main/main.luau"))()'
+local reloadCode = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/main/main.luau?t=" .. tostring(os.time())))()'
 local reconnecting = false
 local reloadQueued = false
 local function queueReload()
@@ -1066,12 +1068,12 @@ percentSlider("Miner level budget", "characterPercent", 4)
 toggle("Buy upgrades", "upgrades", 5)
 percentSlider("Upgrade budget", "upgradePercent", 6)
 toggle("Equip best", "equipBest", 7)
-toggle("Promote Mythic+", "promoteMythics", 8)
+toggle("Promote Mythic+ " .. BUILD, "promoteMythics", 8)
 local promotionInfo = make("TextLabel", body, {
     Size = UDim2.new(1, 0, 0, 17),
     BackgroundTransparency = 1,
     LayoutOrder = 9,
-    Text = "Mythic+ · " .. state.promotionStatus,
+    Text = BUILD .. " · " .. state.promotionStatus,
     TextColor3 = muted,
     TextSize = 10,
     Font = Enum.Font.Gotham,
@@ -1282,7 +1284,7 @@ task.spawn(function()
             end
 
             processPromotion(mine)
-            promotionInfo.Text = "Mythic+ · " .. state.promotionStatus
+            promotionInfo.Text = BUILD .. " · " .. state.promotionStatus
 
             if (state.characters or state.upgrades) and not state.promotion
                 and not boughtPickaxe and now - lastPickaxe >= 2.5 and money > 0
@@ -1333,7 +1335,7 @@ task.spawn(function()
         end)
         if not ok then
             status.Text = "Error: " .. tostring(err)
-            promotionInfo.Text = "Mythic+ · error: " .. tostring(err)
+            promotionInfo.Text = BUILD .. " · error: " .. tostring(err)
         end
         task.wait(0.25)
     end

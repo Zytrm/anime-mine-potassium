@@ -5,7 +5,7 @@ Client-side Luau panel for the Anime Mine place. It uses the game's existing `Ga
 ## Load in Potassium
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/main/main.luau"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/main/main.luau?t=" .. tostring(os.time())))()
 ```
 
 ## Controls
