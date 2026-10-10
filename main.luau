@@ -3,7 +3,7 @@
 
 repeat task.wait() until game:IsLoaded()
 
-local BUILD = "r8"
+local BUILD = "r9"
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -59,7 +59,6 @@ local state = {
     choices = {},
     lastAction = "Ready",
     promotionStatus = "Searching inventory",
-    failedPromotionSlots = {},
     budgetRevision = 0,
     eventPayload = nil,
     rewardCooldowns = {},
@@ -433,8 +432,7 @@ local function bestMythicPromotion(mine)
     local targets = {}
     for key, holder in pairs(mine.Holders or {}) do
         if type(key) == "string" and key:match("^M%d+$")
-            and type(holder) == "table" and type(holder.CharName) == "string"
-            and os.clock() >= (state.failedPromotionSlots[key] or 0) then
+            and type(holder) == "table" and type(holder.CharName) == "string" then
             local item = Items.GetItemData(holder.CharName)
             if item and item.MineRole ~= "Hauler" then
                 local damage = MineConfig.GetHolderDamage(holder, item)
@@ -445,9 +443,7 @@ local function bestMythicPromotion(mine)
         end
     end
     if #targets == 0 then
-        return nil, state.lastFailedPromotionSlot
-            and "No responsive holder; last " .. state.lastFailedPromotionSlot
-            or "No placed miner to replace"
+        return nil, "No placed miner to replace"
     end
     table.sort(targets, function(a, b) return a.damage < b.damage end)
 
@@ -494,9 +490,7 @@ local function bestMythicPromotion(mine)
             return best
         end
     end
-    return nil, state.lastFailedPromotionSlot
-        and "No other eligible holder; last " .. state.lastFailedPromotionSlot
-        or foundRare and "No Mythic+ beats weakest at max level"
+    return nil, foundRare and "No Mythic+ beats weakest at max level"
         or "No Mythic+ in inventory"
 end
 
@@ -605,6 +599,20 @@ local function retryHolderPrompt(job)
     end
 end
 
+local function pausePromotion(job, reason)
+    local prompt = ownHolderPrompt(job.slot)
+    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    local parent = prompt and prompt.Parent
+    local position = parent and (parent:IsA("Attachment") and parent.WorldPosition
+        or parent:IsA("BasePart") and parent.Position)
+    local distance = position and root and (root.Position - position).Magnitude
+    local detail = distance and string.format(" (%.0f/%.0f studs)",
+        distance, prompt.MaxActivationDistance) or ""
+    state.promotionPaused = "Paused: " .. job.slot .. " " .. reason .. detail
+    state.promotionStatus = state.promotionPaused
+    state.lastAction = "Promotion paused; toggle Promote Mythic+ off/on to retry"
+end
+
 local function processPromotion(mine)
     if not state.promoteMythics and not state.promotion then
         state.priorityMiner = nil
@@ -613,6 +621,10 @@ local function processPromotion(mine)
     end
     local job = state.promotion
     if not job then
+        if state.promotionPaused then
+            state.promotionStatus = state.promotionPaused
+            return
+        end
         if os.clock() < (state.nextPromotionAt or 0) then
             return
         end
@@ -623,11 +635,7 @@ local function processPromotion(mine)
         end
         local prompt = ownHolderPrompt(candidate.slot)
         if not prompt then
-            state.failedPromotionSlots[candidate.slot] = os.clock() + 300
-            state.lastFailedPromotionSlot = candidate.slot
-            state.nextPromotionAt = os.clock() + 1
-            state.lastAction = "Mythic: " .. candidate.slot .. " pickup prompt unavailable"
-            state.promotionStatus = candidate.slot .. " prompt unavailable; trying next"
+            pausePromotion({slot = candidate.slot}, "prompt missing")
             return
         end
         job = {key = candidate.key, name = candidate.name, slot = candidate.slot,
@@ -643,7 +651,7 @@ local function processPromotion(mine)
             state.suppressDropsUntil = os.clock() + 3
             if not triggerHolderPrompt(job) then
                 state.promotion = nil
-                state.promotionStatus = job.promptError or "Prompt trigger unavailable"
+                pausePromotion(job, job.promptError or "prompt unavailable")
                 return
             end
             state.promotionStatus = "Picking up " .. candidate.slot .. " via " .. job.triggerMethod
@@ -653,19 +661,10 @@ local function processPromotion(mine)
     end
     if os.clock() > job.deadline then
         state.promotion = nil
-        if job.phase == "awaitEmpty" then
-            state.failedPromotionSlots[job.slot] = os.clock() + 300
-            state.lastFailedPromotionSlot = job.slot
-            state.nextPromotionAt = os.clock() + 1
-        else
-            state.nextPromotionAt = os.clock() + 60
-        end
         send("MineEquipBest")
-        state.lastAction = "Mythic swap timed out"
-        state.promotionStatus = job.phase == "awaitEmpty"
-            and (job.slot .. " " .. (job.triggerMethod or "prompt") .. " pickup unchanged; next")
-            or job.phase == "awaitPlace" and (job.slot .. " placement unchanged")
-            or "Timed out at " .. job.phase
+        pausePromotion(job, job.phase == "awaitEmpty" and "pickup unchanged"
+            or job.phase == "awaitPlace" and "placement unchanged"
+            or job.phase .. " timeout")
         return
     end
     local holder = (mine.Holders or {})[job.slot]
@@ -674,7 +673,7 @@ local function processPromotion(mine)
             state.suppressDropsUntil = os.clock() + 3
             if not triggerHolderPrompt(job) then
                 state.promotion = nil
-                state.promotionStatus = job.promptError or "Prompt trigger unavailable"
+                pausePromotion(job, job.promptError or "prompt unavailable")
                 return
             end
             job.phase = "awaitEmpty"
@@ -683,7 +682,6 @@ local function processPromotion(mine)
         end
     elseif job.phase == "awaitEmpty" then
         if not (holder and type(holder.CharName) == "string" and holder.CharName ~= "") then
-            state.failedPromotionSlots[job.slot] = nil
             job.hotbar = MineInventory.TargetSlot(mine, job.key)
             send("MineAssignHotbar", job.hotbar, job.key)
             job.phase = "awaitHotbar"
@@ -714,7 +712,7 @@ local function processPromotion(mine)
             end
             if not triggerHolderPrompt(job, job.nativeSent) then
                 state.promotion = nil
-                state.promotionStatus = job.promptError or "Prompt trigger unavailable"
+                pausePromotion(job, job.promptError or "prompt unavailable")
                 return
             end
             job.phase = "awaitPlace"
@@ -726,7 +724,6 @@ local function processPromotion(mine)
         if holder and holder.CharName == job.name then
             state.priorityMiner = job.slot
             state.promotion = nil
-            state.lastFailedPromotionSlot = nil
             state.lastAction = "Mythic placed; levelling next"
             state.promotionStatus = "Placed " .. job.name .. "; levelling"
         end
@@ -1082,6 +1079,8 @@ local function toggle(label, key, order)
             state.budgetRevision += 1
         end
         if key == "promoteMythics" and state[key] then
+            state.promotionPaused = nil
+            state.nextPromotionAt = 0
             state.characters = true
             if state.refreshCharacters then
                 state.refreshCharacters()
