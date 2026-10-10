@@ -3,7 +3,7 @@
 
 repeat task.wait() until game:IsLoaded()
 
-local BUILD = "r11"
+local BUILD = "r12"
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -853,7 +853,6 @@ local function processPromotion(mine)
             return
         end
         if reached then
-            state.suppressDropsUntil = os.clock() + 3
             local placing = job.phase == "approachPlace"
             if not triggerHolderPrompt(job, placing and job.nativeSent) then
                 state.promotion = nil
@@ -938,25 +937,78 @@ local function postRareDrop(key, amount, rarity)
     end)
 end
 
-local function scanRareDrops(mine)
-    local current = {}
-    for key, count in pairs(mine.Characters or {}) do
-        current[key] = tonumber(count) or 0
-        local previous = state.lastInventory and (state.lastInventory[key] or 0)
-        if previous and current[key] > previous
-            and os.clock() >= (state.suppressDropsUntil or 0) then
-            local name = MineConfig.ParseCharStack(key)
-            local item = Items.GetItemData(name)
-            local rarity = item and item.Rarity and item.Rarity.Rarity
-            local notify = rarity == "Mythical" and state.webhookMythical
-                or rarity == "Exotic" and state.webhookExotic
-                or rarity and rarityRank(rarity) > rarityRank("Exotic") and state.webhookHigher
-            if notify then
-                postRareDrop(key, current[key] - previous, rarity)
+local function rareRarity(key)
+    if type(key) ~= "string" then
+        return nil
+    end
+    local parsed, name = pcall(MineConfig.ParseCharStack, key)
+    if not parsed or not name then
+        return nil
+    end
+    local found, item = pcall(Items.GetItemData, name)
+    if not found then
+        return nil
+    end
+    local rarity = item and item.Rarity and item.Rarity.Rarity
+    if rarity == "Mythical" and state.webhookMythical
+        or rarity == "Exotic" and state.webhookExotic
+        or rarity and rarityRank(rarity) > rarityRank("Exotic") and state.webhookHigher then
+        return rarity
+    end
+    return nil
+end
+
+local function chestRareCounts(chest)
+    local drops = {}
+    local visited = {}
+    local function add(key, amount)
+        amount = tonumber(amount)
+        if not amount or amount <= 0 or not rareRarity(key) then
+            return false
+        end
+        drops[key] = (drops[key] or 0) + amount
+        return true
+    end
+    local function walk(contents, depth)
+        if type(contents) ~= "table" or visited[contents] or depth > 5 then
+            return
+        end
+        visited[contents] = true
+        local named = contents.Key or contents.CharKey or contents.CharName
+            or contents.Character or contents.Name
+        if add(named, contents.Count or contents.Amount or contents.Quantity or 1) then
+            return
+        end
+        for key, value in pairs(contents) do
+            if type(value) == "number" then
+                add(key, value)
+            elseif type(value) == "string" and type(key) == "string" then
+                add(key, value)
+            elseif type(value) == "string" and type(key) == "number" then
+                add(value, 1)
+            elseif type(value) == "table" then
+                if not add(key, value.Count or value.Amount or value.Quantity) then
+                    walk(value, depth + 1)
+                end
             end
         end
     end
-    state.lastInventory = current
+    walk(chest, 0)
+    return drops
+end
+
+local function confirmChestDrops(pending, mine)
+    for key, expected in pairs(pending.drops) do
+        local before = pending.inventory[key] or 0
+        local current = tonumber((mine.Characters or {})[key]) or 0
+        local gained = math.min(expected, math.max(0, current - before))
+        local newAmount = gained - (pending.notified[key] or 0)
+        local rarity = rareRarity(key)
+        if newAmount > 0 and rarity then
+            postRareDrop(key, newAmount, rarity)
+            pending.notified[key] = gained
+        end
+    end
 end
 
 state.eventConnection = GameState.ListenToEvent(EventsConfig.Events.State, function(payload)
@@ -1382,7 +1434,7 @@ make("TextLabel", body, {
     TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd,
 })
-toggle("Rare drop webhook", "webhook", 14)
+toggle("Chest drop webhook", "webhook", 14)
 toggle("Mythical alerts", "webhookMythical", 15)
 toggle("Exotic alerts", "webhookExotic", 16)
 toggle("Higher alerts", "webhookHigher", 17)
@@ -1524,7 +1576,9 @@ do
 end
 
 task.spawn(function()
-    local lastChest, lastZone, lastEquip, lastPickaxe = 0, 0, 0, 0
+    local lastChest = tonumber(previousState and previousState.lastChestRequestAt) or -math.huge
+    local lastZone, lastEquip, lastPickaxe = 0, 0, 0
+    local chestSeenAt, chestPending
     local lastReward, lastEventOpen = 0, 0
     local lastBatchAt = 0
     local rewardTurn = 0
@@ -1537,10 +1591,43 @@ task.spawn(function()
             end
 
             local now = os.clock()
-            scanRareDrops(mine)
-            if state.chest and now - lastChest >= 4 and next(mine.Chest or {}) ~= nil then
-                send("MineTakeChest")
-                lastChest = now
+            local chest = mine.Chest or {}
+            local hasChest = type(chest) == "table" and next(chest) ~= nil
+            if chestPending then
+                if not hasChest and not chestPending.confirmedAt then
+                    chestPending.confirmedAt = now
+                end
+                if chestPending.confirmedAt then
+                    confirmChestDrops(chestPending, mine)
+                    if now - chestPending.confirmedAt >= 5 then
+                        chestPending = nil
+                    end
+                elseif now - chestPending.sentAt >= 20 then
+                    -- A missing acknowledgement must not cause rapid repeat requests.
+                    chestPending = nil
+                end
+                if not chestPending then
+                    chestSeenAt = hasChest and now or nil
+                end
+            elseif not hasChest then
+                chestSeenAt = nil
+            elseif state.chest then
+                chestSeenAt = chestSeenAt or now
+                if now - chestSeenAt >= 3 and now - lastChest >= 8 then
+                    local inventory = {}
+                    for key, count in pairs(mine.Characters or {}) do
+                        inventory[key] = tonumber(count) or 0
+                    end
+                    local drops = chestRareCounts(chest)
+                    if send("MineTakeChest") then
+                        chestPending = {
+                            sentAt = now, drops = drops, inventory = inventory,
+                            notified = {},
+                        }
+                        lastChest = now
+                        state.lastChestRequestAt = now
+                    end
+                end
             end
 
             if state.stage ~= "Off" and now - lastZone >= 3 then
