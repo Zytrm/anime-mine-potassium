@@ -420,7 +420,7 @@ local function bestMythicPromotion(mine, money)
         if entry.Kind == "Character" and entry.Role == "Miner"
             and entry.Count > 0 and rarityRank(entry.Rarity) >= rarityRank("Mythical") then
             local item = Items.GetItemData(entry.Name)
-            if item and not MineConfig.GetScaledPct(item) then
+            if item then
                 local level = entry.Level or 1
                 local spent = 0
                 while level < MineConfig.CharMaxLevel do
@@ -431,12 +431,29 @@ local function bestMythicPromotion(mine, money)
                     spent += cost
                     level += 1
                 end
-                local pickaxe = MineConfig.GetHolderPickaxe(weakest.holder)
-                local damage = MineConfig.GetCharacterDamage(item)
-                    * MineConfig.GetCharacterLevelMultiplier(level)
-                    * MineConfig.GetVariantMult(entry.Variant)
-                    * (pickaxe and pickaxe.Multiplier or 1)
-                if damage > weakest.damage * 1.05 and (not best or damage > best.damage) then
+                local projected = table.clone(weakest.holder)
+                projected.CharName = entry.Name
+                projected.CharLevel = level
+                projected.CharVariant = entry.Variant
+                projected.Scaled = nil
+                local allowed = true
+                if MineConfig.GetScaledPct(item) then
+                    local anyZone = MineConfig.IsScaledAnyZone(item)
+                    allowed = MineConfig.ScaledEnabled()
+                        and MineConfig.CountScaledOnPads(mine, Items.GetItemData,
+                            weakest.key, anyZone) < MineConfig.GetScaledPadCap(item)
+                    if allowed then
+                        local remainingMine = table.clone(mine)
+                        remainingMine.Holders = table.clone(mine.Holders or {})
+                        remainingMine.Holders[weakest.key] = nil
+                        local reference = MineConfig.GetScaledReference(
+                            remainingMine, Items.GetItemData, anyZone)
+                        projected.Scaled = MineConfig.BuildScaledStamp(projected, item, reference)
+                    end
+                end
+                local damage = allowed and MineConfig.GetHolderDamage(projected, item) or nil
+                if damage and damage > weakest.damage * 1.05
+                    and (not best or damage > best.damage) then
                     best = {key = entry.Key, name = entry.Name, slot = weakest.key, damage = damage}
                 end
             end
@@ -887,7 +904,7 @@ percentSlider("Miner level budget", "characterPercent", 4)
 toggle("Buy upgrades", "upgrades", 5)
 percentSlider("Upgrade budget", "upgradePercent", 6)
 toggle("Equip best", "equipBest", 7)
-toggle("Promote mythics", "promoteMythics", 8)
+toggle("Promote Mythic+", "promoteMythics", 8)
 toggle("Claim rewards", "rewards", 9)
 toggle("Rare drop webhook", "webhook", 10)
 toggle("Mythical alerts", "webhookMythical", 11)
