@@ -913,7 +913,7 @@ end
 task.spawn(function()
     local lastChest, lastZone, lastEquip, lastPickaxe = 0, 0, 0, 0
     local lastReward, lastEventOpen = 0, 0
-    local budgetBase, usedCharacter, usedUpgrade, lastBatchAt = nil, 0, 0, 0
+    local lastBatchAt = 0
     local rewardTurn = 0
     while state.running and gui.Parent do
         local ok, err = pcall(function()
@@ -961,25 +961,18 @@ task.spawn(function()
             processPromotion(mine, money)
 
             if (state.characters or state.upgrades) and not state.promotion
-                and not boughtPickaxe and now - lastPickaxe >= 2.5 and money > 0 then
-                if budgetBase == nil or (usedCharacter + usedUpgrade > 0 and money >= budgetBase) then
-                    budgetBase, usedCharacter, usedUpgrade = money, 0, 0
-                end
-                local characterCap = (state.characters and budgetBase * state.characterPercent / 100 or 0)
-                    - usedCharacter
-                local upgradeCap = (state.upgrades and budgetBase * state.upgradePercent / 100 or 0)
-                    - usedUpgrade
-                local sharedCap = budgetBase * math.max(
+                and not boughtPickaxe and now - lastPickaxe >= 2.5 and money > 0
+                and now - lastBatchAt >= 3 then
+                local characterCap = state.characters and money * state.characterPercent / 100 or 0
+                local upgradeCap = state.upgrades and money * state.upgradePercent / 100 or 0
+                local sharedCap = money * math.max(
                     state.characters and state.characterPercent or 0,
                     state.upgrades and state.upgradePercent or 0
-                ) / 100 - usedCharacter - usedUpgrade
-                if math.max(characterCap, upgradeCap) > 0 and sharedCap > 0
-                    and now - lastBatchAt >= 3 then
-                    local count, characterSpent, upgradeSpent = spendBatch(
+                ) / 100
+                if math.max(characterCap, upgradeCap) > 0 and sharedCap > 0 then
+                    local count = spendBatch(
                         mine, money, characterCap, upgradeCap, sharedCap)
                     if count > 0 then
-                        usedCharacter += characterSpent
-                        usedUpgrade += upgradeSpent
                         lastBatchAt = now
                         state.lastAction = "Bought " .. count .. " levels/upgrades within budget"
                     end

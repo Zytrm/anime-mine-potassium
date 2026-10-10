@@ -13,7 +13,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-pota
 - **Collect chest:** takes all available chest contents.
 - **Buy pickaxes:** buys one copy of each selected pickaxe when it is unlocked, affordable, and in stock. Click names in the scroll list to include or exclude them. Robux pickaxes are excluded.
 - **Level miners:** buys available character levels in quick batches. Its slider starts at 20%. Each purchase must cost less than that share of the remaining balance.
-- **Buy upgrades:** buys available core and skill tree upgrades in the same quick batch. Its slider also starts at 20%. The script tracks spending across batches until the balance recovers: combined spending is capped by the higher slider, and each category obeys its own slider.
+- **Buy upgrades:** buys available core and skill tree upgrades in the same quick batch. Its slider also starts at 20%. Each batch uses the current balance; combined spending is capped by the higher slider, and each category obeys its own slider. A new batch can run after the balance updates.
 - **Equip best:** calls the game's equip-best action every 15 seconds.
 - **Promote mythics:** compares mythic or rarer miners in inventory against the weakest placed miner after affordable levelling. If one would be stronger, it uses Potassium's prompt automation to pick up the weak miner and place the stronger one. This is opt in and turns on miner levelling. The game server may still reject distant prompt actions.
 - **Claim rewards:** claims available index, event, and enabled daily quest rewards. This starts on.
