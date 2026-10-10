@@ -3,7 +3,7 @@
 
 repeat task.wait() until game:IsLoaded()
 
-local BUILD = "r10"
+local BUILD = "r11"
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -816,6 +816,7 @@ local function processPromotion(mine)
             phase = "approachPickup", deadline = os.clock() + 65,
             prompt = prompt, promptAction = prompt.ActionText}
         state.promotion = job
+        state.equipBestBlockedUntil = os.clock() + 15
         state.nextPromotionAt = os.clock() + 60
         if MineInventory.EquippedSlot(mine) then
             send("MineEquipSlot", "")
@@ -830,7 +831,9 @@ local function processPromotion(mine)
     if os.clock() > job.deadline then
         stopPromotionWalk()
         state.promotion = nil
-        send("MineEquipBest")
+        if os.clock() >= (state.equipBestBlockedUntil or 0) then
+            send("MineEquipBest")
+        end
         pausePromotion(job, job.phase == "awaitEmpty" and "pickup unchanged"
             or job.phase == "awaitPlace" and "placement unchanged"
             or job.phase .. " timeout")
@@ -859,6 +862,9 @@ local function processPromotion(mine)
             end
             job.phase = placing and "awaitPlace" or "awaitEmpty"
             job.deadline = os.clock() + 10
+            if placing then
+                state.equipBestBlockedUntil = os.clock() + 15
+            end
             state.lastAction = placing and "Mythic: placing " .. job.name
                 or "Mythic: picking up weakest miner"
             state.promotionStatus = (placing and "Placing at " or "Picking up ")
@@ -900,6 +906,9 @@ local function processPromotion(mine)
     elseif job.phase == "awaitPlace" then
         if holder and holder.CharName == job.name then
             stopPromotionWalk()
+            -- Start the full grace period on server-confirmed placement,
+            -- even if projected upgrades clear priority before they replicate.
+            state.equipBestBlockedUntil = os.clock() + 15
             state.priorityMiner = job.slot
             state.promotion = nil
             state.lastAction = "Mythic placed; levelling next"
@@ -1547,6 +1556,7 @@ task.spawn(function()
             end
 
             if state.equipBest and not state.promotion and not state.priorityMiner
+                and now >= (state.equipBestBlockedUntil or 0)
                 and now - lastEquip >= 15 then
                 send("MineEquipBest")
                 lastEquip = now
