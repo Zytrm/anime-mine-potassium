@@ -3,7 +3,7 @@
 
 repeat task.wait() until game:IsLoaded()
 
-local BUILD = "r5"
+local BUILD = "r6"
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -187,20 +187,41 @@ local function snapshot()
     return data, data.MineGame, tonumber(data.Money) or 0
 end
 
+local function cheapestHolderStat(mine, key, holder, item, limit)
+    local best
+    local function consider(stat, field, level, cap, costFunction)
+        if level < cap then
+            local cost = tonumber(costFunction(level, item))
+            if cost and cost > 0 and cost <= limit
+                and (not best or cost < best.cost) then
+                best = {key = key, stat = stat, field = field, level = level, cost = cost}
+            end
+        end
+    end
+
+    consider("Damage", "CharLevel", MineConfig.GetHolderLevel(holder),
+        MineConfig.GetCharLevelCap(mine, key, holder, item, Items.GetItemData),
+        MineConfig.GetCharacterUpgradeCost)
+    if type(key) == "string" and key:match("^M%d+$")
+        and item.MineRole ~= "Hauler" then
+        consider("Speed", "CharSpeedLevel", MineConfig.GetHolderSpeedLevel(holder),
+            MineConfig.CharSpeedMaxLevel, MineConfig.GetCharacterSpeedUpgradeCost)
+        consider("MineSpeed", "CharMineSpeedLevel",
+            MineConfig.GetHolderMineSpeedLevel(holder),
+            MineConfig.CharMineSpeedMaxLevel,
+            MineConfig.GetCharacterMineSpeedUpgradeCost)
+    end
+    return best
+end
+
 local function cheapestCharacter(mine, limit)
     local best
     for key, holder in pairs(mine.Holders or {}) do
         if type(holder) == "table" and type(holder.CharName) == "string" then
             local item = Items.GetItemData(holder.CharName)
-            if item then
-                local level = MineConfig.GetHolderLevel(holder)
-                local cap = MineConfig.GetCharLevelCap(mine, key, holder, item, Items.GetItemData)
-                if level < cap then
-                    local cost = tonumber(MineConfig.GetCharacterUpgradeCost(level, item))
-                    if cost and cost > 0 and cost < limit and (not best or cost < best.cost) then
-                        best = {key = key, cost = cost}
-                    end
-                end
+            local choice = item and cheapestHolderStat(mine, key, holder, item, limit)
+            if choice and (not best or choice.cost < best.cost) then
+                best = choice
             end
         end
     end
@@ -331,7 +352,9 @@ local function affordablePriority(mine, limit)
         return nil
     end
     local cost = tonumber(MineConfig.GetCharacterUpgradeCost(level, item))
-    return cost and cost > 0 and cost < limit and {key = key, cost = cost} or nil
+    return cost and cost > 0 and cost <= limit and {
+        key = key, stat = "Damage", field = "CharLevel", level = level, cost = cost,
+    } or nil
 end
 
 local function spendBatch(mine, money, characterBudget, upgradeBudget, sharedBudget)
@@ -369,9 +392,9 @@ local function spendBatch(mine, money, characterBudget, upgradeBudget, sharedBud
         end
 
         if character and (not upgrade or character.cost <= upgrade.cost or state.priorityMiner == character.key) then
-            send("MineUpgradeCharacter", character.key)
+            send("MineUpgradeCharacter", character.key, character.stat)
             local holder = planned.Holders[character.key]
-            holder.CharLevel = MineConfig.GetHolderLevel(holder) + 1
+            holder[character.field] = character.level + 1
             characterBudget -= character.cost
             sharedBudget -= character.cost
             available -= character.cost
@@ -1072,7 +1095,7 @@ local function percentSlider(label, key, order)
     end))
 end
 
-percentSlider("Miner level budget", "characterPercent", 4)
+percentSlider("Miner stats budget", "characterPercent", 4)
 toggle("Buy upgrades", "upgrades", 5)
 percentSlider("Upgrade budget", "upgradePercent", 6)
 toggle("Equip best", "equipBest", 7)
