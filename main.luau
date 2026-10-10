@@ -481,13 +481,52 @@ local function ownHolderPrompt(slot)
     return nil
 end
 
+local function replicateHolderPrompt(prompt)
+    if type(replicatesignal) ~= "function" then
+        return false
+    end
+    if type(cansignalreplicate) == "function" then
+        local ok, allowed = pcall(cansignalreplicate, prompt.Triggered)
+        if not ok or not allowed then
+            return false
+        end
+    end
+    return pcall(replicatesignal, prompt.Triggered, player)
+end
+
+local function triggerHolderPrompt(job, preferReplicated)
+    job.promptSentAt = os.clock()
+    job.replicated = false
+    if preferReplicated then
+        job.replicated = true
+        if replicateHolderPrompt(job.prompt) then
+            return true
+        end
+    end
+    if type(fireproximityprompt) == "function" then
+        local ok = pcall(fireproximityprompt, job.prompt)
+        if ok then
+            return true
+        end
+    end
+    job.replicated = true
+    return replicateHolderPrompt(job.prompt)
+end
+
+local function retryHolderPrompt(job)
+    if not job.replicated and os.clock() - (job.promptSentAt or 0) >= 1.5 then
+        job.replicated = true
+        job.serverSignalSent = replicateHolderPrompt(job.prompt)
+    end
+end
+
 local function processPromotion(mine)
     if not state.promoteMythics and not state.promotion then
         state.priorityMiner = nil
         state.promotionStatus = "Off"
         return
     end
-    if type(fireproximityprompt) ~= "function" then
+    if type(fireproximityprompt) ~= "function" and type(replicatesignal) ~= "function" then
         state.lastAction = "Mythic: prompt API unavailable"
         state.promotionStatus = "Prompt API unavailable"
         return
@@ -518,7 +557,11 @@ local function processPromotion(mine)
             state.promotionStatus = "Unequipping held item"
         else
             state.suppressDropsUntil = os.clock() + 3
-            fireproximityprompt(prompt)
+            if not triggerHolderPrompt(job) then
+                state.promotion = nil
+                state.promotionStatus = "Prompt trigger unavailable"
+                return
+            end
             state.promotionStatus = "Picking up " .. candidate.slot
             state.lastAction = "Mythic: picking up weakest miner"
         end
@@ -526,43 +569,69 @@ local function processPromotion(mine)
     end
     if os.clock() > job.deadline then
         state.promotion = nil
-        state.nextPromotionAt = os.clock() + 15
+        state.nextPromotionAt = os.clock() + 60
         send("MineEquipBest")
         state.lastAction = "Mythic swap timed out"
-        state.promotionStatus = "Timed out at " .. job.phase
+        state.promotionStatus = job.phase == "awaitEmpty" and "Remote pickup not accepted"
+            or job.phase == "awaitPlace" and "Remote placement not accepted"
+            or "Timed out at " .. job.phase
         return
     end
     local holder = (mine.Holders or {})[job.slot]
     if job.phase == "awaitUnequip" then
         if not MineInventory.EquippedSlot(mine) then
             state.suppressDropsUntil = os.clock() + 3
-            fireproximityprompt(job.prompt)
+            if not triggerHolderPrompt(job) then
+                state.promotion = nil
+                state.promotionStatus = "Prompt trigger unavailable"
+                return
+            end
             job.phase = "awaitEmpty"
+            job.deadline = os.clock() + 10
             state.promotionStatus = "Picking up " .. job.slot
         end
-    elseif job.phase == "awaitEmpty" and not (holder and holder.CharName) then
-        job.hotbar = MineInventory.TargetSlot(mine, job.key)
-        send("MineAssignHotbar", job.hotbar, job.key)
-        job.phase = "awaitHotbar"
-        state.promotionStatus = "Assigning " .. job.name
+    elseif job.phase == "awaitEmpty" then
+        if not (holder and holder.CharName) then
+            job.hotbar = MineInventory.TargetSlot(mine, job.key)
+            send("MineAssignHotbar", job.hotbar, job.key)
+            job.phase = "awaitHotbar"
+            job.deadline = os.clock() + 10
+            state.promotionStatus = "Assigning " .. job.name
+        else
+            local hadRetried = job.replicated
+            retryHolderPrompt(job)
+            if not hadRetried and job.replicated then
+                state.promotionStatus = job.serverSignalSent
+                    and "Trying remote pickup " .. job.slot
+                    or "Remote pickup signal unavailable"
+            end
+        end
     elseif job.phase == "awaitHotbar" then
         if (mine.Hotbar or {})[job.hotbar] == job.key then
             send("MineEquipSlot", job.hotbar)
             job.phase = "awaitEquip"
+            job.deadline = os.clock() + 10
             state.promotionStatus = "Equipping " .. job.name
         end
     elseif job.phase == "awaitEquip" then
         if MineInventory.EquippedSlot(mine) == job.hotbar then
-            fireproximityprompt(job.prompt)
+            if not triggerHolderPrompt(job, job.serverSignalSent) then
+                state.promotion = nil
+                state.promotionStatus = "Prompt trigger unavailable"
+                return
+            end
             job.phase = "awaitPlace"
+            job.deadline = os.clock() + 10
             state.lastAction = "Mythic: placing " .. job.name
             state.promotionStatus = "Placing " .. job.name
         end
-    elseif job.phase == "awaitPlace" and holder and holder.CharName == job.name then
-        state.priorityMiner = job.slot
-        state.promotion = nil
-        state.lastAction = "Mythic placed; levelling next"
-        state.promotionStatus = "Placed " .. job.name .. "; levelling"
+    elseif job.phase == "awaitPlace" then
+        if holder and holder.CharName == job.name then
+            state.priorityMiner = job.slot
+            state.promotion = nil
+            state.lastAction = "Mythic placed; levelling next"
+            state.promotionStatus = "Placed " .. job.name .. "; levelling"
+        end
     end
 end
 
