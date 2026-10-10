@@ -3,7 +3,7 @@
 
 repeat task.wait() until game:IsLoaded()
 
-local BUILD = "r9"
+local BUILD = "r10"
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,6 +12,8 @@ local HttpService = game:GetService("HttpService")
 local VirtualUser = game:GetService("VirtualUser")
 local TeleportService = game:GetService("TeleportService")
 local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local modules = ReplicatedStorage:WaitForChild("Modules")
@@ -511,33 +513,204 @@ local function ownHolderPrompt(slot)
     return nil
 end
 
+local function promptPosition(prompt)
+    local parent = prompt and prompt.Parent
+    return parent and (parent:IsA("Attachment") and parent.WorldPosition
+        or parent:IsA("BasePart") and parent.Position) or nil
+end
+
+local function stopPromotionWalk(reason)
+    local walk = state.promotionWalk
+    if not walk then
+        return
+    end
+    state.promotionWalk = nil
+    if walk.connection then
+        walk.connection:Disconnect()
+    end
+    if reason then
+        walk.job.walkError = reason
+    end
+    pcall(function()
+        walk.humanoid:MoveTo(walk.root.Position)
+        walk.humanoid:Move(Vector3.zero, false)
+    end)
+    if walk.restoreControls then
+        pcall(function()
+            walk.controls:Enable()
+        end)
+    end
+end
+
+-- Only promotion owns this movement. Follow a normal humanoid path and stop
+-- as soon as the real prompt radius is reached, before submitting the action.
+local function approachHolder(job)
+    local prompt = ownHolderPrompt(job.slot)
+    local position = promptPosition(prompt)
+    local character = player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not position or not prompt.Enabled then
+        return nil, "prompt unavailable"
+    end
+    if not root or not humanoid or humanoid.Health <= 0 then
+        return nil, "character unavailable"
+    end
+    local radius = prompt.MaxActivationDistance
+        - math.min(1.5, prompt.MaxActivationDistance * 0.2)
+    if radius <= 0 then
+        return nil, "prompt has no activation range"
+    end
+    if (root.Position - position).Magnitude <= radius then
+        stopPromotionWalk()
+        job.walkError = nil
+        return true
+    end
+    if job.walkError then
+        return nil, job.walkError
+    end
+    state.promotionStatus = "Walking to " .. job.slot
+    if state.promotionWalk then
+        return false
+    end
+
+    local offset = root.Position - position
+    local horizontal = Vector3.new(offset.X, 0, offset.Z)
+    -- Aim slightly inside the stopping radius to allow for path tolerances.
+    local targetRadius = math.max(0, radius - 1)
+    local reach = math.sqrt(math.max(0, targetRadius ^ 2 - offset.Y ^ 2))
+    local direction = horizontal.Magnitude > 0.01 and horizontal.Unit or Vector3.zero
+    local goal = Vector3.new(position.X, root.Position.Y, position.Z) + direction * reach
+    local now = os.clock()
+    local walk = {job = job, root = root, humanoid = humanoid, index = 2,
+        progressPosition = root.Position, progressAt = now, sentAt = 0,
+        deadline = now + math.clamp(offset.Magnitude / math.max(humanoid.WalkSpeed, 1) * 3 + 8, 12, 60)}
+    state.promotionWalk = walk
+    job.deadline = walk.deadline + 2
+    walk.connection = RunService.Heartbeat:Connect(function()
+        local ok, err = pcall(function()
+            if not state.running or not state.promoteMythics or state.promotion ~= job then
+                stopPromotionWalk("walking cancelled")
+                return
+            end
+            if player.Character ~= character or not root.Parent or humanoid.Health <= 0 then
+                stopPromotionWalk("character changed")
+                return
+            end
+            local current = ownHolderPrompt(job.slot)
+            local point = promptPosition(current)
+            if not point or not current.Enabled then
+                stopPromotionWalk("prompt unavailable")
+                return
+            end
+            local range = current.MaxActivationDistance
+                - math.min(1.5, current.MaxActivationDistance * 0.2)
+            if (root.Position - point).Magnitude <= range then
+                stopPromotionWalk()
+                return
+            end
+            local clockNow = os.clock()
+            if clockNow > walk.deadline then
+                stopPromotionWalk("walking timed out")
+                return
+            end
+            if not walk.waypoints then
+                return
+            end
+            if (root.Position - walk.progressPosition).Magnitude >= 0.5 then
+                walk.progressPosition = root.Position
+                walk.progressAt = clockNow
+            elseif clockNow - walk.progressAt > 4 then
+                stopPromotionWalk("walking path blocked")
+                return
+            end
+            local waypoint = walk.waypoints[walk.index]
+            if not waypoint then
+                stopPromotionWalk("no walking route")
+                return
+            end
+            local delta = root.Position - waypoint.Position
+            if Vector3.new(delta.X, 0, delta.Z).Magnitude < 2
+                and walk.index < #walk.waypoints then
+                walk.index += 1
+                waypoint = walk.waypoints[walk.index]
+            end
+            if walk.sentIndex ~= walk.index or clockNow - walk.sentAt > 2 then
+                if waypoint.Action == Enum.PathWaypointAction.Jump then
+                    humanoid.Jump = true
+                end
+                humanoid:MoveTo(waypoint.Position)
+                walk.sentIndex = walk.index
+                walk.sentAt = clockNow
+            end
+        end)
+        if not ok then
+            stopPromotionWalk("walking error: " .. tostring(err))
+        end
+    end)
+    task.spawn(function()
+        -- Default player controls can cancel MoveTo every frame. Suspend them
+        -- only while walking, and preserve a previously disabled control state.
+        local controlsOk, controls = pcall(function()
+            local scripts = player:FindFirstChild("PlayerScripts")
+            local module = scripts and scripts:FindFirstChild("PlayerModule")
+            return module and require(module):GetControls()
+        end)
+        if state.promotionWalk ~= walk then
+            return
+        end
+        if controlsOk and controls and controls.controlsEnabled ~= false then
+            walk.controls = controls
+            walk.restoreControls = true
+            local disabled = pcall(function()
+                controls:Disable()
+            end)
+            if not disabled then
+                stopPromotionWalk("could not suspend player controls")
+                return
+            end
+        end
+        local ok, result = pcall(function()
+            local path = PathfindingService:CreatePath({AgentRadius = 2,
+                AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 4})
+            path:ComputeAsync(root.Position, goal)
+            if path.Status ~= Enum.PathStatus.Success then
+                return nil
+            end
+            return path:GetWaypoints()
+        end)
+        -- A stopped/replaced walk must never start moving after planning finishes.
+        if state.promotionWalk ~= walk then
+            return
+        end
+        if not ok or not result or #result < 2 then
+            stopPromotionWalk("no walking route")
+            return
+        end
+        walk.waypoints = result
+        walk.progressAt = os.clock()
+    end)
+    return false
+end
+
 local function triggerNativeHolderPrompt(prompt)
-    local originalDistance, originalLineOfSight
-    local ok = pcall(function()
-        originalDistance = prompt.MaxActivationDistance
-        originalLineOfSight = prompt.RequiresLineOfSight
-        prompt.MaxActivationDistance = math.max(originalDistance, 100000)
-        prompt.RequiresLineOfSight = false
-        task.wait(0.1)
+    return pcall(function()
         prompt:InputHoldBegin()
         task.wait(math.max(prompt.HoldDuration, 0) + 0.08)
         prompt:InputHoldEnd()
     end)
-    pcall(function()
-        if originalDistance then
-            prompt.MaxActivationDistance = originalDistance
-        end
-        if originalLineOfSight ~= nil then
-            prompt.RequiresLineOfSight = originalLineOfSight
-        end
-    end)
-    return ok
 end
 
 local function triggerHolderPrompt(job, preferNative)
     local prompt = ownHolderPrompt(job.slot)
     if not prompt or not prompt.Enabled then
         job.promptError = job.slot .. " prompt unavailable"
+        return false
+    end
+    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    local position = promptPosition(prompt)
+    if not root or not position or (root.Position - position).Magnitude > prompt.MaxActivationDistance then
+        job.promptError = "outside prompt range"
         return false
     end
     job.prompt = prompt
@@ -600,6 +773,7 @@ local function retryHolderPrompt(job)
 end
 
 local function pausePromotion(job, reason)
+    stopPromotionWalk()
     local prompt = ownHolderPrompt(job.slot)
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     local parent = prompt and prompt.Parent
@@ -639,27 +813,22 @@ local function processPromotion(mine)
             return
         end
         job = {key = candidate.key, name = candidate.name, slot = candidate.slot,
-            phase = "awaitEmpty", deadline = os.clock() + 10,
+            phase = "approachPickup", deadline = os.clock() + 65,
             prompt = prompt, promptAction = prompt.ActionText}
         state.promotion = job
         state.nextPromotionAt = os.clock() + 60
         if MineInventory.EquippedSlot(mine) then
             send("MineEquipSlot", "")
             job.phase = "awaitUnequip"
+            job.deadline = os.clock() + 10
             state.promotionStatus = "Unequipping held item"
         else
-            state.suppressDropsUntil = os.clock() + 3
-            if not triggerHolderPrompt(job) then
-                state.promotion = nil
-                pausePromotion(job, job.promptError or "prompt unavailable")
-                return
-            end
-            state.promotionStatus = "Picking up " .. candidate.slot .. " via " .. job.triggerMethod
-            state.lastAction = "Mythic: picking up weakest miner"
+            state.promotionStatus = "Approaching " .. job.slot
         end
         return
     end
     if os.clock() > job.deadline then
+        stopPromotionWalk()
         state.promotion = nil
         send("MineEquipBest")
         pausePromotion(job, job.phase == "awaitEmpty" and "pickup unchanged"
@@ -670,15 +839,30 @@ local function processPromotion(mine)
     local holder = (mine.Holders or {})[job.slot]
     if job.phase == "awaitUnequip" then
         if not MineInventory.EquippedSlot(mine) then
+            job.phase = "approachPickup"
+            job.deadline = os.clock() + 65
+        end
+    elseif job.phase == "approachPickup" or job.phase == "approachPlace" then
+        local reached, reason = approachHolder(job)
+        if reached == nil then
+            state.promotion = nil
+            pausePromotion(job, reason)
+            return
+        end
+        if reached then
             state.suppressDropsUntil = os.clock() + 3
-            if not triggerHolderPrompt(job) then
+            local placing = job.phase == "approachPlace"
+            if not triggerHolderPrompt(job, placing and job.nativeSent) then
                 state.promotion = nil
                 pausePromotion(job, job.promptError or "prompt unavailable")
                 return
             end
-            job.phase = "awaitEmpty"
+            job.phase = placing and "awaitPlace" or "awaitEmpty"
             job.deadline = os.clock() + 10
-            state.promotionStatus = "Picking up " .. job.slot .. " via " .. job.triggerMethod
+            state.lastAction = placing and "Mythic: placing " .. job.name
+                or "Mythic: picking up weakest miner"
+            state.promotionStatus = (placing and "Placing at " or "Picking up ")
+                .. job.slot .. " via " .. job.triggerMethod
         end
     elseif job.phase == "awaitEmpty" then
         if not (holder and type(holder.CharName) == "string" and holder.CharName ~= "") then
@@ -710,18 +894,12 @@ local function processPromotion(mine)
                 state.promotionStatus = "Waiting for " .. job.slot .. " placement prompt"
                 return
             end
-            if not triggerHolderPrompt(job, job.nativeSent) then
-                state.promotion = nil
-                pausePromotion(job, job.promptError or "prompt unavailable")
-                return
-            end
-            job.phase = "awaitPlace"
-            job.deadline = os.clock() + 10
-            state.lastAction = "Mythic: placing " .. job.name
-            state.promotionStatus = "Placing at " .. job.slot .. " via " .. job.triggerMethod
+            job.phase = "approachPlace"
+            job.deadline = os.clock() + 65
         end
     elseif job.phase == "awaitPlace" then
         if holder and holder.CharName == job.name then
+            stopPromotionWalk()
             state.priorityMiner = job.slot
             state.promotion = nil
             state.lastAction = "Mythic placed; levelling next"
@@ -888,6 +1066,7 @@ local gui = make("ScreenGui", playerGui, {
 })
 state.gui = gui
 state.stop = function()
+    stopPromotionWalk()
     saveConfig()
     state.running = false
     for _, connection in ipairs(state.connections) do
@@ -1085,6 +1264,11 @@ local function toggle(label, key, order)
             if state.refreshCharacters then
                 state.refreshCharacters()
             end
+        elseif key == "promoteMythics" then
+            stopPromotionWalk()
+            state.promotion = nil
+            state.priorityMiner = nil
+            state.promotionStatus = "Off"
         end
         refresh()
         scheduleSave()
@@ -1429,6 +1613,11 @@ task.spawn(function()
                 .. "  ·  " .. state.lastAction
         end)
         if not ok then
+            if state.promotion then
+                local job = state.promotion
+                state.promotion = nil
+                pausePromotion(job, "script error")
+            end
             status.Text = "Error: " .. tostring(err)
             promotionInfo.Text = BUILD .. " · error: " .. tostring(err)
         end
