@@ -20,6 +20,7 @@ local EventsConfig = require(modules:WaitForChild("MineEventsConfig"))
 local DailyQuests = require(modules:WaitForChild("MineDailyQuestsCatalog"))
 
 local global = (type(getgenv) == "function" and getgenv()) or _G
+local previousState = global.AnimeMinePotassium
 if global.AnimeMinePotassium then
     if type(global.AnimeMinePotassium.stop) == "function" then
         global.AnimeMinePotassium.stop()
@@ -55,7 +56,100 @@ local state = {
     rewardCooldowns = {},
     connections = {},
 }
+
+local configFolder = "AnimeMinePotassium"
+local configPath = configFolder .. "/config-" .. tostring(game.GameId)
+    .. "-" .. tostring(player.UserId) .. ".json"
+local booleanSettings = {
+    "chest", "pickaxes", "characters", "upgrades", "equipBest", "promoteMythics",
+    "rewards", "webhook", "webhookMythical", "webhookExotic", "webhookHigher",
+}
+local validStages = {Highest = true, Off = true}
+for _, zone in ipairs(MineConfig.ZoneKeys or {}) do
+    validStages[zone] = true
+end
+
+local function applyConfig(config)
+    if type(config) ~= "table" then
+        return
+    end
+    for _, key in ipairs(booleanSettings) do
+        if type(config[key]) == "boolean" then
+            state[key] = config[key]
+        end
+    end
+    for _, key in ipairs({"characterPercent", "upgradePercent"}) do
+        local value = tonumber(config[key])
+        if value and value == value and value > -math.huge and value < math.huge then
+            state[key] = math.clamp(math.floor(value + 0.5), 0, 100)
+        end
+    end
+    if type(config.stage) == "string" and validStages[config.stage] then
+        state.stage = config.stage
+    end
+    if type(config.webhookUrl) == "string" then
+        state.webhookUrl = config.webhookUrl
+    end
+    if type(config.choices) == "table" then
+        for _, pickaxe in ipairs(MineConfig.Pickaxes or {}) do
+            if not pickaxe.RobuxOnly and not MineConfig.IsPickaxeFree(pickaxe) then
+                state.choices[pickaxe.Name] = config.choices[pickaxe.Name] == true
+            end
+        end
+    end
+    if state.promoteMythics then
+        state.characters = true
+    end
+end
+
+if type(readfile) == "function" and type(isfile) == "function" then
+    local ok, config = pcall(function()
+        return isfile(configPath) and HttpService:JSONDecode(readfile(configPath)) or nil
+    end)
+    if ok then
+        applyConfig(config)
+    end
+end
+applyConfig(previousState)
+
+local function saveConfig()
+    if type(writefile) ~= "function" or type(makefolder) ~= "function" then
+        return
+    end
+    local config = {version = 1, choices = {}}
+    for _, key in ipairs(booleanSettings) do
+        config[key] = state[key]
+    end
+    config.characterPercent = state.characterPercent
+    config.upgradePercent = state.upgradePercent
+    config.stage = state.stage
+    config.webhookUrl = state.webhookUrl
+    for name, selected in pairs(state.choices) do
+        if selected then
+            config.choices[name] = true
+        end
+    end
+    pcall(function()
+        if type(isfolder) ~= "function" or not isfolder(configFolder) then
+            makefolder(configFolder)
+        end
+        writefile(configPath, HttpService:JSONEncode(config))
+    end)
+end
+
+local saveRevision = 0
+local function scheduleSave()
+    saveRevision += 1
+    local revision = saveRevision
+    task.delay(0.6, function()
+        if state.running and revision == saveRevision then
+            saveConfig()
+        end
+    end)
+end
+
 global.AnimeMinePotassium = state
+saveConfig()
 
 local function send(action, ...)
     if action == IndexRewards.Events.Claim or action == EventsConfig.Events.Claim
@@ -587,6 +681,7 @@ local gui = make("ScreenGui", playerGui, {
 })
 state.gui = gui
 state.stop = function()
+    saveConfig()
     state.running = false
     for _, connection in ipairs(state.connections) do
         connection:Disconnect()
@@ -716,6 +811,7 @@ local function toggle(label, key, order)
             end
         end
         refresh()
+        scheduleSave()
     end)
     refresh()
     return refresh
@@ -763,6 +859,7 @@ local function percentSlider(label, key, order)
         if state[key] ~= percent then
             state[key] = percent
             state.budgetRevision += 1
+            scheduleSave()
         end
         title.Text = label .. " · " .. tostring(percent) .. "% of current money"
         fill.Size = UDim2.fromScale(percent / 100, 1)
@@ -804,7 +901,7 @@ local webhookBox = make("TextBox", body, {
     LayoutOrder = 14,
     PlaceholderText = "Paste webhook URL here",
     PlaceholderColor3 = muted,
-    Text = "",
+    Text = state.webhookUrl,
     TextColor3 = white,
     TextSize = 11,
     Font = Enum.Font.Gotham,
@@ -813,8 +910,9 @@ local webhookBox = make("TextBox", body, {
 })
 corner(webhookBox, 5)
 make("UIPadding", webhookBox, {PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9)})
-webhookBox.FocusLost:Connect(function()
+webhookBox:GetPropertyChangedSignal("Text"):Connect(function()
     state.webhookUrl = webhookBox.Text:match("^%s*(.-)%s*$") or ""
+    scheduleSave()
 end)
 
 local stageButton = row("Mine stage", 15)
@@ -830,6 +928,7 @@ stageButton.MouseButton1Click:Connect(function()
     local index = table.find(stageOptions, state.stage) or 1
     state.stage = stageOptions[index % #stageOptions + 1]
     refreshStage()
+    scheduleSave()
 end)
 refreshStage()
 
@@ -861,7 +960,7 @@ make("UIListLayout", picker, {
 })
 for index, pickaxe in ipairs(MineConfig.Pickaxes or {}) do
     if not pickaxe.RobuxOnly and not MineConfig.IsPickaxeFree(pickaxe) then
-        state.choices[pickaxe.Name] = false
+        state.choices[pickaxe.Name] = state.choices[pickaxe.Name] == true
         local button = make("TextButton", picker, {
             Size = UDim2.new(1, -6, 0, 23),
             BackgroundColor3 = bg,
@@ -879,6 +978,7 @@ for index, pickaxe in ipairs(MineConfig.Pickaxes or {}) do
         button.MouseButton1Click:Connect(function()
             state.choices[pickaxe.Name] = not state.choices[pickaxe.Name]
             refresh()
+            scheduleSave()
         end)
         refresh()
     end

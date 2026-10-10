@@ -17,9 +17,11 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-pota
 - **Equip best:** calls the game's equip-best action every 15 seconds.
 - **Promote mythics:** compares mythic or rarer miners in inventory against the weakest placed miner after affordable levelling. If one would be stronger, it uses Potassium's prompt automation to pick up the weak miner and place the stronger one. This is opt in and turns on miner levelling. The game server may still reject distant prompt actions.
 - **Claim rewards:** claims available index, event, and enabled daily quest rewards. This starts on.
-- **Rare drop webhook:** paste a webhook URL into the panel and turn on the main toggle. Separate toggles control Mythical, Exotic, and higher rarity alerts. A JSON message is sent when a selected rarity enters inventory. Existing inventory is used as the baseline, so loading the script does not announce old items. The URL is kept only in the current script session.
+- **Rare drop webhook:** paste a webhook URL into the panel and turn on the main toggle. Separate toggles control Mythical, Exotic, and higher rarity alerts. A JSON message is sent when a selected rarity enters inventory. Existing inventory is used as the baseline, so loading the script does not announce old items.
 - **Mine stage:** cycles between highest unlocked, off, and individual zones.
 
 Chest collection, equip best, reward claims, and highest unlocked stage are enabled initially. Spending controls start off so you can choose which purchases to automate. The panel can be dragged, minimized, closed, and rerun without leaving a second loop.
+
+Settings save automatically to `AnimeMinePotassium/config-<game ID>-<user ID>.json` in Potassium's workspace and load the next time the script runs. This includes toggles, sliders, stage, selected pickaxes, and the webhook URL. The webhook URL is stored as plain text in that local file. When upgrading from an earlier script version in the same session, the current panel settings are carried over.
 
 The purchase and reward loop uses game events, so it can run while the Roblox window is unfocused as long as the client remains running and connected. Mythic swapping uses prompt automation; server-side distance rules may reject it.
