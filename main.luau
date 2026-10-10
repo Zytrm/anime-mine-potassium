@@ -3,7 +3,7 @@
 
 repeat task.wait() until game:IsLoaded()
 
-local BUILD = "r6"
+local BUILD = "r7"
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -59,6 +59,7 @@ local state = {
     choices = {},
     lastAction = "Ready",
     promotionStatus = "Searching inventory",
+    failedPromotionSlots = {},
     budgetRevision = 0,
     eventPayload = nil,
     rewardCooldowns = {},
@@ -429,63 +430,73 @@ local function rarityRank(name)
 end
 
 local function bestMythicPromotion(mine)
-    local weakest
+    local targets = {}
     for key, holder in pairs(mine.Holders or {}) do
         if type(key) == "string" and key:match("^M%d+$")
-            and type(holder) == "table" and type(holder.CharName) == "string" then
+            and type(holder) == "table" and type(holder.CharName) == "string"
+            and os.clock() >= (state.failedPromotionSlots[key] or 0) then
             local item = Items.GetItemData(holder.CharName)
             if item and item.MineRole ~= "Hauler" then
                 local damage = MineConfig.GetHolderDamage(holder, item)
-                if type(damage) == "number" and (not weakest or damage < weakest.damage) then
-                    weakest = {key = key, holder = holder, damage = damage}
+                if type(damage) == "number" then
+                    targets[#targets + 1] = {key = key, holder = holder, damage = damage}
                 end
             end
         end
     end
-    if not weakest then
-        return nil, "No placed miner to replace"
+    if #targets == 0 then
+        return nil, state.lastFailedPromotionSlot
+            and "No responsive holder; last " .. state.lastFailedPromotionSlot
+            or "No placed miner to replace"
     end
+    table.sort(targets, function(a, b) return a.damage < b.damage end)
 
-    local best
     local foundRare = false
-    for _, entry in ipairs(MineInventory.EntriesFromCounts(mine, mine.Characters or {})) do
-        if entry.Kind == "Character" and entry.Role == "Miner"
-            and entry.Count > 0 and rarityRank(entry.Rarity) >= rarityRank("Mythical") then
-            foundRare = true
-            local item = Items.GetItemData(entry.Name)
-            if item then
-                local projected = table.clone(weakest.holder)
-                projected.CharName = entry.Name
-                projected.CharLevel = MineConfig.CharMaxLevel
-                projected.CharVariant = entry.Variant
-                projected.Scaled = nil
-                local allowed = true
-                if MineConfig.GetScaledPct(item) then
-                    local anyZone = MineConfig.IsScaledAnyZone(item)
-                    allowed = MineConfig.ScaledEnabled()
-                        and MineConfig.CountScaledOnPads(mine, Items.GetItemData,
-                            weakest.key, anyZone) < MineConfig.GetScaledPadCap(item)
-                    if allowed then
-                        local remainingMine = table.clone(mine)
-                        remainingMine.Holders = table.clone(mine.Holders or {})
-                        remainingMine.Holders[weakest.key] = nil
-                        local reference = MineConfig.GetScaledReference(
-                            remainingMine, Items.GetItemData, anyZone)
-                        projected.Scaled = MineConfig.BuildScaledStamp(projected, item, reference)
+    local entries = MineInventory.EntriesFromCounts(mine, mine.Characters or {})
+    for _, target in ipairs(targets) do
+        local best
+        for _, entry in ipairs(entries) do
+            if entry.Kind == "Character" and entry.Role == "Miner"
+                and entry.Count > 0 and rarityRank(entry.Rarity) >= rarityRank("Mythical") then
+                foundRare = true
+                local item = Items.GetItemData(entry.Name)
+                if item then
+                    local projected = table.clone(target.holder)
+                    projected.CharName = entry.Name
+                    projected.CharLevel = MineConfig.CharMaxLevel
+                    projected.CharVariant = entry.Variant
+                    projected.Scaled = nil
+                    local allowed = true
+                    if MineConfig.GetScaledPct(item) then
+                        local anyZone = MineConfig.IsScaledAnyZone(item)
+                        allowed = MineConfig.ScaledEnabled()
+                            and MineConfig.CountScaledOnPads(mine, Items.GetItemData,
+                                target.key, anyZone) < MineConfig.GetScaledPadCap(item)
+                        if allowed then
+                            local remainingMine = table.clone(mine)
+                            remainingMine.Holders = table.clone(mine.Holders or {})
+                            remainingMine.Holders[target.key] = nil
+                            local reference = MineConfig.GetScaledReference(
+                                remainingMine, Items.GetItemData, anyZone)
+                            projected.Scaled = MineConfig.BuildScaledStamp(projected, item, reference)
+                        end
+                    end
+                    local damage = allowed and MineConfig.GetHolderDamage(projected, item) or nil
+                    if damage and damage > target.damage * 1.05
+                        and (not best or damage > best.damage) then
+                        best = {key = entry.Key, name = entry.Name,
+                            slot = target.key, damage = damage}
                     end
                 end
-                local damage = allowed and MineConfig.GetHolderDamage(projected, item) or nil
-                if damage and damage > weakest.damage * 1.05
-                    and (not best or damage > best.damage) then
-                    best = {key = entry.Key, name = entry.Name, slot = weakest.key, damage = damage}
-                end
             end
         end
+        if best then
+            return best
+        end
     end
-    if best then
-        return best
-    end
-    return nil, foundRare and "No Mythic+ beats weakest at max level"
+    return nil, state.lastFailedPromotionSlot
+        and "No other eligible holder; last " .. state.lastFailedPromotionSlot
+        or foundRare and "No Mythic+ beats weakest at max level"
         or "No Mythic+ in inventory"
 end
 
@@ -575,13 +586,17 @@ local function processPromotion(mine)
             return
         end
         local prompt = ownHolderPrompt(candidate.slot)
-        if not prompt then
-            state.lastAction = "Mythic: plot prompt unavailable"
-            state.promotionStatus = "Plot prompt unavailable"
+        if not prompt or not prompt.Enabled or prompt.ActionText ~= "Pick up" then
+            state.failedPromotionSlots[candidate.slot] = os.clock() + 300
+            state.lastFailedPromotionSlot = candidate.slot
+            state.nextPromotionAt = os.clock() + 1
+            state.lastAction = "Mythic: " .. candidate.slot .. " pickup prompt unavailable"
+            state.promotionStatus = candidate.slot .. " prompt unavailable; trying next"
             return
         end
         job = {key = candidate.key, name = candidate.name, slot = candidate.slot,
-            phase = "awaitEmpty", deadline = os.clock() + 10, prompt = prompt}
+            phase = "awaitEmpty", deadline = os.clock() + 10,
+            prompt = prompt, promptAction = prompt.ActionText}
         state.promotion = job
         state.nextPromotionAt = os.clock() + 60
         if MineInventory.EquippedSlot(mine) then
@@ -602,10 +617,17 @@ local function processPromotion(mine)
     end
     if os.clock() > job.deadline then
         state.promotion = nil
-        state.nextPromotionAt = os.clock() + 60
+        if job.phase == "awaitEmpty" then
+            state.failedPromotionSlots[job.slot] = os.clock() + 300
+            state.lastFailedPromotionSlot = job.slot
+            state.nextPromotionAt = os.clock() + 1
+        else
+            state.nextPromotionAt = os.clock() + 60
+        end
         send("MineEquipBest")
         state.lastAction = "Mythic swap timed out"
-        state.promotionStatus = job.phase == "awaitEmpty" and "Remote pickup not accepted"
+        state.promotionStatus = job.phase == "awaitEmpty"
+            and (job.slot .. " " .. job.promptAction .. " failed; trying next")
             or job.phase == "awaitPlace" and "Remote placement not accepted"
             or "Timed out at " .. job.phase
         return
@@ -625,6 +647,7 @@ local function processPromotion(mine)
         end
     elseif job.phase == "awaitEmpty" then
         if not (holder and holder.CharName) then
+            state.failedPromotionSlots[job.slot] = nil
             job.hotbar = MineInventory.TargetSlot(mine, job.key)
             send("MineAssignHotbar", job.hotbar, job.key)
             job.phase = "awaitHotbar"
@@ -662,6 +685,7 @@ local function processPromotion(mine)
         if holder and holder.CharName == job.name then
             state.priorityMiner = job.slot
             state.promotion = nil
+            state.lastFailedPromotionSlot = nil
             state.lastAction = "Mythic placed; levelling next"
             state.promotionStatus = "Placed " .. job.name .. "; levelling"
         end
