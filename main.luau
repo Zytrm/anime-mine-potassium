@@ -139,25 +139,45 @@ local function cheapestUpgrade(mine, limit)
     return best
 end
 
-local function bestPickaxe(data, mine, money)
-    local best
-    for index, pickaxe in ipairs(MineConfig.Pickaxes or {}) do
+local function buySelectedPickaxes(data, mine, money)
+    local available, sent = money, 0
+    for index = #(MineConfig.Pickaxes or {}), 1, -1 do
+        local pickaxe = MineConfig.Pickaxes[index]
         if state.choices[pickaxe.Name]
             and not pickaxe.RobuxOnly
             and not MineConfig.IsPickaxeFree(pickaxe)
             and (mine.UnlockedZones or {})[pickaxe.ZoneReq] then
-            local owned = (tonumber((mine.Pickaxes or {})[pickaxe.Name]) or 0)
-                + MineConfig.CountAssignedPickaxes(mine.Holders, pickaxe.Name)
             local remaining = MineStock.GetRemaining(data, pickaxe.Name)
             local cost = tonumber(pickaxe.Cost)
-            if owned < 1 and cost and cost <= money
-                and (remaining == nil or remaining > 0)
-                and (not best or (tonumber(pickaxe.Multiplier) or 0) > best.multiplier) then
-                best = {index = index, multiplier = tonumber(pickaxe.Multiplier) or 0}
+            if cost and cost > 0 and cost <= available then
+                local quantity = 0
+                if MineStock.IsStocked(pickaxe) then
+                    if type(remaining) == "number" then
+                        quantity = math.min(math.floor(remaining), math.floor(available / cost), 12 - sent)
+                    end
+                else
+                    local owned = (tonumber((mine.Pickaxes or {})[pickaxe.Name]) or 0)
+                        + MineConfig.CountAssignedPickaxes(mine.Holders, pickaxe.Name)
+                    if owned < 1 then
+                        quantity = 1
+                    end
+                end
+                for _ = 1, quantity do
+                    if not state.running or not state.pickaxes or not state.choices[pickaxe.Name] then
+                        return sent
+                    end
+                    send("MineBuyPickaxe", index)
+                    available -= cost
+                    sent += 1
+                    task.wait(0.12)
+                end
+                if sent >= 12 then
+                    break
+                end
             end
         end
     end
-    return best
+    return sent
 end
 
 local function copyForPurchases(mine)
@@ -817,7 +837,7 @@ local optionLabel = make("TextLabel", body, {
     Size = UDim2.new(1, 0, 0, 18),
     BackgroundTransparency = 1,
     LayoutOrder = 16,
-    Text = "PICKAXES TO BUY  ·  ONE OF EACH",
+    Text = "PICKAXES TO BUY  ·  ALL STOCK",
     TextColor3 = muted,
     TextSize = 10,
     Font = Enum.Font.GothamBold,
@@ -841,7 +861,7 @@ make("UIListLayout", picker, {
 })
 for index, pickaxe in ipairs(MineConfig.Pickaxes or {}) do
     if not pickaxe.RobuxOnly and not MineConfig.IsPickaxeFree(pickaxe) then
-        state.choices[pickaxe.Name] = true
+        state.choices[pickaxe.Name] = false
         local button = make("TextButton", picker, {
             Size = UDim2.new(1, -6, 0, 23),
             BackgroundColor3 = bg,
@@ -950,11 +970,11 @@ task.spawn(function()
 
             local boughtPickaxe = false
             if state.pickaxes and now - lastPickaxe >= 2.5 then
-                local pickaxe = state.pickaxes and bestPickaxe(data, mine, money)
-                if pickaxe then
-                    send("MineBuyPickaxe", pickaxe.index)
+                local count = buySelectedPickaxes(data, mine, money)
+                if count > 0 then
                     lastPickaxe = now
                     boughtPickaxe = true
+                    state.lastAction = "Bought " .. count .. " selected pickaxes"
                 end
             end
 
