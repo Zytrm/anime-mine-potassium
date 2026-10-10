@@ -7,6 +7,9 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
+local TeleportService = game:GetService("TeleportService")
+local CoreGui = game:GetService("CoreGui")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local modules = ReplicatedStorage:WaitForChild("Modules")
@@ -43,6 +46,8 @@ local state = {
     equipBest = true,
     promoteMythics = false,
     rewards = true,
+    antiAfk = true,
+    autoReconnect = true,
     webhook = false,
     webhookMythical = true,
     webhookExotic = true,
@@ -63,7 +68,8 @@ local configPath = configFolder .. "/config-" .. tostring(game.GameId)
     .. "-" .. tostring(player.UserId) .. ".json"
 local booleanSettings = {
     "chest", "pickaxes", "characters", "upgrades", "equipBest", "promoteMythics",
-    "rewards", "webhook", "webhookMythical", "webhookExotic", "webhookHigher",
+    "rewards", "antiAfk", "autoReconnect", "webhook", "webhookMythical",
+    "webhookExotic", "webhookHigher",
 }
 local validStages = {Highest = true, Off = true}
 for _, zone in ipairs(MineConfig.ZoneKeys or {}) do
@@ -736,6 +742,73 @@ local function track(connection)
     return connection
 end
 
+-- A virtual click at an off-screen coordinate resets idle without moving the avatar.
+track(player.Idled:Connect(function()
+    if not state.running or not state.antiAfk then
+        return
+    end
+    local ok = pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new(-1000, -1000), CFrame.new())
+    end)
+    state.lastAction = ok and "Idle activity sent" or "Anti-AFK unavailable"
+end))
+
+local reloadCode = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/main/main.luau"))()'
+local reconnecting = false
+local reloadQueued = false
+local function queueReload()
+    if reloadQueued then
+        return
+    end
+    if type(queueonteleport) == "function" then
+        local ok = pcall(queueonteleport, reloadCode)
+        reloadQueued = ok
+    end
+end
+
+local function attemptReconnect()
+    if not state.running or not state.autoReconnect or reconnecting then
+        return
+    end
+    reconnecting = true
+    task.spawn(function()
+        saveConfig()
+        queueReload()
+        for attempt = 1, 3 do
+            if not state.running or not state.autoReconnect then
+                break
+            end
+            state.lastAction = "Rejoin attempt " .. tostring(attempt)
+            pcall(function()
+                TeleportService:Teleport(game.PlaceId, player)
+            end)
+            task.wait(5 * attempt)
+        end
+        if state.running then
+            state.lastAction = "Reconnect needs a live client"
+        end
+        reconnecting = false
+    end)
+end
+
+-- Roblox's disconnect dialog is created in CoreGui. A completed kick may already
+-- have closed the connection, so this is a best-effort client-side rejoin.
+pcall(function()
+    track(CoreGui.DescendantAdded:Connect(function(instance)
+        if instance.Name == "ErrorPrompt" and instance.Parent
+            and instance.Parent.Name == "promptOverlay" then
+            task.defer(attemptReconnect)
+        end
+    end))
+end)
+track(player.OnTeleport:Connect(function(teleportState)
+    if state.autoReconnect and teleportState == Enum.TeleportState.Started then
+        saveConfig()
+        queueReload()
+    end
+end))
+
 local panel = make("Frame", gui, {
     Size = UDim2.fromOffset(310, 450),
     Position = UDim2.new(1, -326, 0.5, -225),
@@ -937,16 +1010,29 @@ local promotionInfo = make("TextLabel", body, {
     TextTruncate = Enum.TextTruncate.AtEnd,
 })
 toggle("Claim rewards", "rewards", 10)
-toggle("Rare drop webhook", "webhook", 11)
-toggle("Mythical alerts", "webhookMythical", 12)
-toggle("Exotic alerts", "webhookExotic", 13)
-toggle("Higher alerts", "webhookHigher", 14)
+toggle("Quiet anti-AFK", "antiAfk", 11)
+toggle("Auto reconnect", "autoReconnect", 12)
+make("TextLabel", body, {
+    Size = UDim2.new(1, 0, 0, 17),
+    BackgroundTransparency = 1,
+    LayoutOrder = 13,
+    Text = "Rejoin works only while Roblox can still teleport",
+    TextColor3 = muted,
+    TextSize = 10,
+    Font = Enum.Font.Gotham,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+toggle("Rare drop webhook", "webhook", 14)
+toggle("Mythical alerts", "webhookMythical", 15)
+toggle("Exotic alerts", "webhookExotic", 16)
+toggle("Higher alerts", "webhookHigher", 17)
 
 local webhookBox = make("TextBox", body, {
     Size = UDim2.new(1, 0, 0, 28),
     BackgroundColor3 = surface,
     BorderSizePixel = 0,
-    LayoutOrder = 15,
+    LayoutOrder = 18,
     PlaceholderText = "Paste webhook URL here",
     PlaceholderColor3 = muted,
     Text = state.webhookUrl,
@@ -963,7 +1049,7 @@ webhookBox:GetPropertyChangedSignal("Text"):Connect(function()
     scheduleSave()
 end)
 
-local stageButton = row("Mine stage", 16)
+local stageButton = row("Mine stage", 19)
 local stageOptions = {"Highest", "Off"}
 for _, zone in ipairs(MineConfig.ZoneKeys or {}) do
     table.insert(stageOptions, zone)
@@ -983,7 +1069,7 @@ refreshStage()
 local optionLabel = make("TextLabel", body, {
     Size = UDim2.new(1, 0, 0, 18),
     BackgroundTransparency = 1,
-    LayoutOrder = 17,
+    LayoutOrder = 20,
     Text = "PICKAXES TO BUY  ·  ALL STOCK",
     TextColor3 = muted,
     TextSize = 10,
@@ -998,7 +1084,7 @@ local picker = make("ScrollingFrame", body, {
     ScrollBarImageColor3 = accent,
     CanvasSize = UDim2.fromOffset(0, 0),
     AutomaticCanvasSize = Enum.AutomaticSize.Y,
-    LayoutOrder = 18,
+    LayoutOrder = 21,
 })
 corner(picker, 5)
 make("UIListLayout", picker, {
@@ -1035,7 +1121,7 @@ end
 local status = make("TextLabel", body, {
     Size = UDim2.new(1, 0, 0, 20),
     BackgroundTransparency = 1,
-    LayoutOrder = 19,
+    LayoutOrder = 22,
     Text = "Ready · waiting for game data",
     TextColor3 = muted,
     TextSize = 10,

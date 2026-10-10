@@ -19,8 +19,10 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-pota
 - **Claim rewards:** claims available index, event, and enabled daily quest rewards. This starts on.
 - **Rare drop webhook:** paste a webhook URL into the panel and turn on the main toggle. Separate toggles control Mythical, Exotic, and higher rarity alerts. A JSON message is sent when a selected rarity enters inventory. Existing inventory is used as the baseline, so loading the script does not announce old items.
 - **Mine stage:** cycles between highest unlocked, off, and individual zones.
+- **Quiet anti-AFK:** sends a virtual off-screen click when Roblox reports the player idle. It does not move the avatar or require the Roblox window to be focused.
+- **Auto reconnect:** when the Roblox disconnect prompt appears, attempts to rejoin the same place up to three times. Potassium's teleport queue reloads the script after a successful teleport, and the saved settings are restored. It also reloads after ordinary in-game teleports while enabled. A completed kick can end the client connection before any script can rejoin; in that case you must reconnect manually and run the loader again.
 
-Chest collection, equip best, reward claims, and highest unlocked stage are enabled initially. Spending controls start off so you can choose which purchases to automate. The panel can be dragged, minimized, closed, and rerun without leaving a second loop.
+Chest collection, equip best, reward claims, anti-AFK, auto reconnect, and highest unlocked stage are enabled initially. Spending controls start off so you can choose which purchases to automate. The panel can be dragged, minimized, closed, and rerun without leaving a second loop.
 
 Settings save automatically to `AnimeMinePotassium/config-<game ID>-<user ID>.json` in Potassium's workspace and load the next time the script runs. This includes toggles, sliders, stage, selected pickaxes, and the webhook URL. The webhook URL is stored as plain text in that local file. When upgrading from an earlier script version in the same session, the current panel settings are carried over.
 
