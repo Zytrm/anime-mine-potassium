@@ -3,7 +3,7 @@
 
 repeat task.wait() until game:IsLoaded()
 
-local BUILD = "r4"
+local BUILD = "r5"
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -483,25 +483,37 @@ local function ownHolderPrompt(slot)
     return nil
 end
 
-local function replicateHolderPrompt(prompt)
-    if type(replicatesignal) ~= "function" then
-        return false
-    end
-    if type(cansignalreplicate) == "function" then
-        local ok, allowed = pcall(cansignalreplicate, prompt.Triggered)
-        if not ok or not allowed then
-            return false
+local function triggerNativeHolderPrompt(prompt)
+    local originalDistance, originalLineOfSight
+    local ok = pcall(function()
+        originalDistance = prompt.MaxActivationDistance
+        originalLineOfSight = prompt.RequiresLineOfSight
+        prompt.MaxActivationDistance = math.max(originalDistance, 100000)
+        prompt.RequiresLineOfSight = false
+        task.wait(0.1)
+        prompt:InputHoldBegin()
+        task.wait(math.max(prompt.HoldDuration, 0) + 0.08)
+        prompt:InputHoldEnd()
+    end)
+    pcall(function()
+        if originalDistance then
+            prompt.MaxActivationDistance = originalDistance
         end
-    end
-    return pcall(replicatesignal, prompt.Triggered, player)
+        if originalLineOfSight ~= nil then
+            prompt.RequiresLineOfSight = originalLineOfSight
+        end
+    end)
+    return ok
 end
 
-local function triggerHolderPrompt(job, preferReplicated)
+local function triggerHolderPrompt(job, preferNative)
     job.promptSentAt = os.clock()
-    job.replicated = false
-    if preferReplicated then
-        job.replicated = true
-        if replicateHolderPrompt(job.prompt) then
+    job.nativeAttempted = false
+    job.nativeSent = false
+    if preferNative then
+        job.nativeAttempted = true
+        job.nativeSent = triggerNativeHolderPrompt(job.prompt)
+        if job.nativeSent then
             return true
         end
     end
@@ -511,14 +523,15 @@ local function triggerHolderPrompt(job, preferReplicated)
             return true
         end
     end
-    job.replicated = true
-    return replicateHolderPrompt(job.prompt)
+    job.nativeAttempted = true
+    job.nativeSent = triggerNativeHolderPrompt(job.prompt)
+    return job.nativeSent
 end
 
 local function retryHolderPrompt(job)
-    if not job.replicated and os.clock() - (job.promptSentAt or 0) >= 1.5 then
-        job.replicated = true
-        job.serverSignalSent = replicateHolderPrompt(job.prompt)
+    if not job.nativeAttempted and os.clock() - (job.promptSentAt or 0) >= 1.5 then
+        job.nativeAttempted = true
+        job.nativeSent = triggerNativeHolderPrompt(job.prompt)
     end
 end
 
@@ -526,11 +539,6 @@ local function processPromotion(mine)
     if not state.promoteMythics and not state.promotion then
         state.priorityMiner = nil
         state.promotionStatus = "Off"
-        return
-    end
-    if type(fireproximityprompt) ~= "function" and type(replicatesignal) ~= "function" then
-        state.lastAction = "Mythic: prompt API unavailable"
-        state.promotionStatus = "Prompt API unavailable"
         return
     end
     local job = state.promotion
@@ -600,12 +608,12 @@ local function processPromotion(mine)
             job.deadline = os.clock() + 10
             state.promotionStatus = "Assigning " .. job.name
         else
-            local hadRetried = job.replicated
+            local hadRetried = job.nativeAttempted
             retryHolderPrompt(job)
-            if not hadRetried and job.replicated then
-                state.promotionStatus = job.serverSignalSent
-                    and "Trying remote pickup " .. job.slot
-                    or "Remote pickup signal unavailable"
+            if not hadRetried and job.nativeAttempted then
+                state.promotionStatus = job.nativeSent
+                    and "Trying native pickup " .. job.slot
+                    or "Native prompt unavailable"
             end
         end
     elseif job.phase == "awaitHotbar" then
@@ -617,7 +625,7 @@ local function processPromotion(mine)
         end
     elseif job.phase == "awaitEquip" then
         if MineInventory.EquippedSlot(mine) == job.hotbar then
-            if not triggerHolderPrompt(job, job.serverSignalSent) then
+            if not triggerHolderPrompt(job, job.nativeSent) then
                 state.promotion = nil
                 state.promotionStatus = "Prompt trigger unavailable"
                 return
