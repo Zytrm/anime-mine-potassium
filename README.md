@@ -5,8 +5,10 @@ Client-side Luau panel for the Anime Mine place. It uses the game's existing `Ga
 ## Load in Potassium
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/main/main.luau?t=" .. tostring(os.time())))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/2c90ede/bootstrap.luau"))()
 ```
+
+The bootstrap resolves the latest `main` commit through GitHub's API, then downloads that exact revision. Its URL is pinned so GitHub's raw-file cache cannot serve an older bootstrap.
 
 ## Controls
 

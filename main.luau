@@ -825,7 +825,7 @@ track(player.Idled:Connect(function()
     state.lastAction = ok and "Idle activity sent" or "Anti-AFK unavailable"
 end))
 
-local reloadCode = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/main/main.luau?t=" .. tostring(os.time())))()'
+local reloadCode = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Zytrm/anime-mine-potassium/2c90ede/bootstrap.luau"))()'
 local reconnecting = false
 local reloadQueued = false
 local function queueReload()
