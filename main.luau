@@ -51,6 +51,7 @@ local state = {
     stage = "Highest",
     choices = {},
     lastAction = "Ready",
+    promotionStatus = "Searching inventory",
     budgetRevision = 0,
     eventPayload = nil,
     rewardCooldowns = {},
@@ -396,7 +397,7 @@ local function rarityRank(name)
     return MineConfig.RarityIndex[name] or 0
 end
 
-local function bestMythicPromotion(mine, money)
+local function bestMythicPromotion(mine)
     local weakest
     for key, holder in pairs(mine.Holders or {}) do
         if type(key) == "string" and key:match("^M%d+$")
@@ -411,29 +412,20 @@ local function bestMythicPromotion(mine, money)
         end
     end
     if not weakest then
-        return nil
+        return nil, "No placed miner to replace"
     end
 
-    local budget = money * state.characterPercent / 100
     local best
+    local foundRare = false
     for _, entry in ipairs(MineInventory.EntriesFromCounts(mine, mine.Characters or {})) do
         if entry.Kind == "Character" and entry.Role == "Miner"
             and entry.Count > 0 and rarityRank(entry.Rarity) >= rarityRank("Mythical") then
+            foundRare = true
             local item = Items.GetItemData(entry.Name)
             if item then
-                local level = entry.Level or 1
-                local spent = 0
-                while level < MineConfig.CharMaxLevel do
-                    local cost = tonumber(MineConfig.GetCharacterUpgradeCost(level, item))
-                    if not cost or cost <= 0 or spent + cost > budget then
-                        break
-                    end
-                    spent += cost
-                    level += 1
-                end
                 local projected = table.clone(weakest.holder)
                 projected.CharName = entry.Name
-                projected.CharLevel = level
+                projected.CharLevel = MineConfig.CharMaxLevel
                 projected.CharVariant = entry.Variant
                 projected.Scaled = nil
                 local allowed = true
@@ -459,7 +451,11 @@ local function bestMythicPromotion(mine, money)
             end
         end
     end
-    return best
+    if best then
+        return best
+    end
+    return nil, foundRare and "No Mythic+ beats weakest at max level"
+        or "No Mythic+ in inventory"
 end
 
 local function ownHolderPrompt(slot)
@@ -479,13 +475,15 @@ local function ownHolderPrompt(slot)
     return nil
 end
 
-local function processPromotion(mine, money)
+local function processPromotion(mine)
     if not state.promoteMythics and not state.promotion then
         state.priorityMiner = nil
+        state.promotionStatus = "Off"
         return
     end
     if type(fireproximityprompt) ~= "function" then
         state.lastAction = "Mythic: prompt API unavailable"
+        state.promotionStatus = "Prompt API unavailable"
         return
     end
     local job = state.promotion
@@ -493,50 +491,72 @@ local function processPromotion(mine, money)
         if os.clock() < (state.nextPromotionAt or 0) then
             return
         end
-        local candidate = bestMythicPromotion(mine, money)
+        local candidate, reason = bestMythicPromotion(mine)
         if not candidate then
+            state.promotionStatus = reason
             return
         end
         local prompt = ownHolderPrompt(candidate.slot)
         if not prompt then
             state.lastAction = "Mythic: plot prompt unavailable"
+            state.promotionStatus = "Plot prompt unavailable"
             return
         end
         job = {key = candidate.key, name = candidate.name, slot = candidate.slot,
-            phase = "awaitEmpty", deadline = os.clock() + 7, prompt = prompt}
+            phase = "awaitEmpty", deadline = os.clock() + 10, prompt = prompt}
         state.promotion = job
         state.nextPromotionAt = os.clock() + 60
-        state.suppressDropsUntil = os.clock() + 3
-        fireproximityprompt(prompt)
-        state.lastAction = "Mythic: picking up weakest miner"
+        if MineInventory.EquippedSlot(mine) then
+            send("MineEquipSlot", "")
+            job.phase = "awaitUnequip"
+            state.promotionStatus = "Unequipping held item"
+        else
+            state.suppressDropsUntil = os.clock() + 3
+            fireproximityprompt(prompt)
+            state.promotionStatus = "Picking up " .. candidate.slot
+            state.lastAction = "Mythic: picking up weakest miner"
+        end
         return
     end
     if os.clock() > job.deadline then
         state.promotion = nil
+        state.nextPromotionAt = os.clock() + 15
         send("MineEquipBest")
         state.lastAction = "Mythic swap timed out"
+        state.promotionStatus = "Timed out at " .. job.phase
         return
     end
     local holder = (mine.Holders or {})[job.slot]
-    if job.phase == "awaitEmpty" and not (holder and holder.CharName) then
+    if job.phase == "awaitUnequip" then
+        if not MineInventory.EquippedSlot(mine) then
+            state.suppressDropsUntil = os.clock() + 3
+            fireproximityprompt(job.prompt)
+            job.phase = "awaitEmpty"
+            state.promotionStatus = "Picking up " .. job.slot
+        end
+    elseif job.phase == "awaitEmpty" and not (holder and holder.CharName) then
         job.hotbar = MineInventory.TargetSlot(mine, job.key)
         send("MineAssignHotbar", job.hotbar, job.key)
         job.phase = "awaitHotbar"
+        state.promotionStatus = "Assigning " .. job.name
     elseif job.phase == "awaitHotbar" then
         if (mine.Hotbar or {})[job.hotbar] == job.key then
             send("MineEquipSlot", job.hotbar)
             job.phase = "awaitEquip"
+            state.promotionStatus = "Equipping " .. job.name
         end
     elseif job.phase == "awaitEquip" then
         if MineInventory.EquippedSlot(mine) == job.hotbar then
             fireproximityprompt(job.prompt)
             job.phase = "awaitPlace"
             state.lastAction = "Mythic: placing " .. job.name
+            state.promotionStatus = "Placing " .. job.name
         end
     elseif job.phase == "awaitPlace" and holder and holder.CharName == job.name then
         state.priorityMiner = job.slot
         state.promotion = nil
         state.lastAction = "Mythic placed; levelling next"
+        state.promotionStatus = "Placed " .. job.name .. "; levelling"
     end
 end
 
@@ -905,17 +925,28 @@ toggle("Buy upgrades", "upgrades", 5)
 percentSlider("Upgrade budget", "upgradePercent", 6)
 toggle("Equip best", "equipBest", 7)
 toggle("Promote Mythic+", "promoteMythics", 8)
-toggle("Claim rewards", "rewards", 9)
-toggle("Rare drop webhook", "webhook", 10)
-toggle("Mythical alerts", "webhookMythical", 11)
-toggle("Exotic alerts", "webhookExotic", 12)
-toggle("Higher alerts", "webhookHigher", 13)
+local promotionInfo = make("TextLabel", body, {
+    Size = UDim2.new(1, 0, 0, 17),
+    BackgroundTransparency = 1,
+    LayoutOrder = 9,
+    Text = "Mythic+ · " .. state.promotionStatus,
+    TextColor3 = muted,
+    TextSize = 10,
+    Font = Enum.Font.Gotham,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+toggle("Claim rewards", "rewards", 10)
+toggle("Rare drop webhook", "webhook", 11)
+toggle("Mythical alerts", "webhookMythical", 12)
+toggle("Exotic alerts", "webhookExotic", 13)
+toggle("Higher alerts", "webhookHigher", 14)
 
 local webhookBox = make("TextBox", body, {
     Size = UDim2.new(1, 0, 0, 28),
     BackgroundColor3 = surface,
     BorderSizePixel = 0,
-    LayoutOrder = 14,
+    LayoutOrder = 15,
     PlaceholderText = "Paste webhook URL here",
     PlaceholderColor3 = muted,
     Text = state.webhookUrl,
@@ -932,7 +963,7 @@ webhookBox:GetPropertyChangedSignal("Text"):Connect(function()
     scheduleSave()
 end)
 
-local stageButton = row("Mine stage", 15)
+local stageButton = row("Mine stage", 16)
 local stageOptions = {"Highest", "Off"}
 for _, zone in ipairs(MineConfig.ZoneKeys or {}) do
     table.insert(stageOptions, zone)
@@ -952,7 +983,7 @@ refreshStage()
 local optionLabel = make("TextLabel", body, {
     Size = UDim2.new(1, 0, 0, 18),
     BackgroundTransparency = 1,
-    LayoutOrder = 16,
+    LayoutOrder = 17,
     Text = "PICKAXES TO BUY  ·  ALL STOCK",
     TextColor3 = muted,
     TextSize = 10,
@@ -967,7 +998,7 @@ local picker = make("ScrollingFrame", body, {
     ScrollBarImageColor3 = accent,
     CanvasSize = UDim2.fromOffset(0, 0),
     AutomaticCanvasSize = Enum.AutomaticSize.Y,
-    LayoutOrder = 17,
+    LayoutOrder = 18,
 })
 corner(picker, 5)
 make("UIListLayout", picker, {
@@ -1004,7 +1035,7 @@ end
 local status = make("TextLabel", body, {
     Size = UDim2.new(1, 0, 0, 20),
     BackgroundTransparency = 1,
-    LayoutOrder = 18,
+    LayoutOrder = 19,
     Text = "Ready · waiting for game data",
     TextColor3 = muted,
     TextSize = 10,
@@ -1095,7 +1126,8 @@ task.spawn(function()
                 end
             end
 
-            processPromotion(mine, money)
+            processPromotion(mine)
+            promotionInfo.Text = "Mythic+ · " .. state.promotionStatus
 
             if (state.characters or state.upgrades) and not state.promotion
                 and not boughtPickaxe and now - lastPickaxe >= 2.5 and money > 0
@@ -1146,6 +1178,7 @@ task.spawn(function()
         end)
         if not ok then
             status.Text = "Error: " .. tostring(err)
+            promotionInfo.Text = "Mythic+ · error: " .. tostring(err)
         end
         task.wait(0.25)
     end
